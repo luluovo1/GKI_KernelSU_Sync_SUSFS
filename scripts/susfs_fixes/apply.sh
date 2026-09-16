@@ -113,6 +113,24 @@ if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
     echo "临时调整 Android 16 6.12 exec.c 上下文"
     sed -i '/^#include <linux\/dma-buf.h>$/d' fs/exec.c
   fi
+
+  # 6.12.69 起 GKI 的 task_mmu.c 从 vma_pages() 换成了 vma_data_pages()
+  # （声明在 include/linux/pgsize_migration.h，属 16K 页迁移特性）。
+  # 两者语义不同：vma_data_pages 扣掉了 vm_pad_pages 的填充页，不是简单改名。
+  # 而 SUSFS 主补丁以 `if (!vma_pages(vma))` 作为上下文插入
+  # CONFIG_KSU_SUSFS_SUS_MAP 的隐藏代码，上下文对不上会让整个 hunk 被拒 ——
+  # 结果是 smaps 里的隐藏静默失效：补丁只留一个 .rej、编译照样过，
+  # CI 里也只有一条 warning，没有任何东西指向这里。
+  # 这里只是「临时借名」让补丁能匹配，打完补丁后必须还原（见下方还原段）：
+  # 留着改名等于悄悄改掉内核的页计数口径。
+  # 用内容探测而非写死子版本号：切换发生在哪个 sublevel 由 GKI 决定，
+  # 且 6.12 之外的版本永远不会命中，等于自禁用的 no-op。
+  VMA_DATA_PAGES_RENAMED=""
+  if grep -qF 'vma_data_pages(vma)' fs/proc/task_mmu.c; then
+    echo "临时调整 Android 16 6.12 task_mmu.c 上下文（vma_data_pages → vma_pages）"
+    sed -i 's/vma_data_pages/vma_pages/g' fs/proc/task_mmu.c
+    VMA_DATA_PAGES_RENAMED=1
+  fi
 fi
 
 # 新版内核在 super.c 的 internal.h 之后新增了 trace/hooks/fs.h，
@@ -242,6 +260,13 @@ if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
   if [[ "$CURRENT_SUB" -ge 58 ]] && ! grep -qF '#include <linux/dma-buf.h>' fs/exec.c; then
     echo "还原 Android 16 6.12 exec.c 临时调整"
     sed -i '0,/^#include /s//#include <linux\/dma-buf.h>\n&/' fs/exec.c
+  fi
+  if [[ -n "$VMA_DATA_PAGES_RENAMED" ]]; then
+    echo "还原 Android 16 6.12 task_mmu.c 临时调整"
+    # 反向 sed 是安全的：SUSFS 补丁正文里没有任何一行新增 vma_pages
+    # （它只把它当上下文引用一次），所以此时文件里出现的 vma_pages
+    # 全部来自上面那次改名，一对一还原即可。
+    sed -i 's/vma_pages/vma_data_pages/g' fs/proc/task_mmu.c
   fi
 fi
 
