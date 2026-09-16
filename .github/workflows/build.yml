@@ -60,6 +60,10 @@ on:
         required: false
         type: boolean
         default: false
+      use_bbrv3:
+        required: false
+        type: boolean
+        default: false
       cve_2026_43499_patch:
         required: false
         type: boolean
@@ -117,6 +121,7 @@ jobs:
           echo "BBG 补丁      : ${{ inputs.use_bbg }}"
           echo "KPM 功能      : ${{ inputs.use_kpm }}"
           echo "Re-Kernel     : ${{ inputs.use_rekernel }}"
+          echo "BBRv3 拥塞控制: ${{ inputs.use_bbrv3 }}"
           echo "CVE-2026-43499: ${{ inputs.cve_2026_43499_patch }}"
           echo "SUSFS 集成补丁导出: ${{ inputs.export_susfs_patches }}"
           echo "Droidspaces   : ${{ inputs.droidspaces }}"
@@ -1026,6 +1031,79 @@ jobs:
           if ! patch -p1 -F 3 < lz4k_oplus.patch; then
             echo "::warning::lz4k_oplus.patch 应用失败，可能已应用或上下文不匹配"
           fi
+
+      - name: 应用 BBRv3 TCP 拥塞控制补丁
+        if: inputs.use_bbrv3
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -euo pipefail
+
+          BBRV3_DIR="$KERNEL_PATCHES/common/bbrv3"
+          if [ ! -d "$BBRV3_DIR" ]; then
+            echo "::error::BBRv3 补丁目录不存在: $BBRV3_DIR"
+            exit 1
+          fi
+
+          BBRV3_PATCH=""
+          case "$CONFIG" in
+            android16-6.12)
+              echo "6.12 上游已内置 BBRv3，无需打补丁。"
+              ;;
+            android15-6.6)  BBRV3_PATCH="$BBRV3_DIR/0001-net-tcp-backport-BBRv3-to-android15-6.6.patch" ;;
+            android14-6.1)  BBRV3_PATCH="$BBRV3_DIR/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch" ;;
+            android13-5.15) BBRV3_PATCH="$BBRV3_DIR/0001-net-tcp-backport-BBRv3-to-android13-5.15.patch" ;;
+            android12-5.10|android13-5.10) BBRV3_PATCH="$BBRV3_DIR/0001-net-tcp-backport-BBRv3-to-android12-5.10.patch" ;;
+            *)
+              echo "::warning::$CONFIG 没有对应的 BBRv3 补丁，跳过。"
+              ;;
+          esac
+
+          if [ -n "$BBRV3_PATCH" ]; then
+            if [ ! -f "$BBRV3_PATCH" ]; then
+              echo "::error::补丁文件不存在: $BBRV3_PATCH"
+              exit 1
+            fi
+            if patch -p1 --dry-run --forward < "$BBRV3_PATCH" >/dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch < "$BBRV3_PATCH"
+              echo "已应用: $(basename "$BBRV3_PATCH")"
+            elif patch -p1 --dry-run --reverse < "$BBRV3_PATCH" >/dev/null 2>&1; then
+              echo "补丁已应用过，跳过: $(basename "$BBRV3_PATCH")"
+            else
+              echo "::error::BBRv3 补丁无法应用，内核上下文不匹配。以下是 dry-run 详情："
+              patch -p1 --dry-run --forward < "$BBRV3_PATCH" || true
+              exit 1
+            fi
+          fi
+
+          if [ "$CONFIG" = "android12-5.10" ] || [ "$CONFIG" = "android13-5.10" ]; then
+            IPSET_CORE="net/netfilter/ipset/ip_set_core.c"
+            if [ -f "$IPSET_CORE" ]; then
+              sed -i 's/CONFIG_IP_SET_MAX/65534/g' "$IPSET_CORE"
+              echo "已调整 ipset 表上限。"
+            fi
+
+            if ! grep -qF 'int proc_dou8vec_minmax(' include/linux/sysctl.h; then
+              for p in sysctl_add_proc_dou8vec_minmax.patch sysctl_fix_data-races_in_proc_dou8vec_minmax.patch; do
+                if [ -f "$BBRV3_DIR/$p" ]; then
+                  patch -p1 --no-backup-if-mismatch < "$BBRV3_DIR/$p"
+                  echo "已应用: $p"
+                else
+                  echo "::warning::缺少辅助补丁: $BBRV3_DIR/$p"
+                fi
+              done
+            else
+              echo "proc_dou8vec_minmax 已存在，跳过 sysctl 补丁。"
+            fi
+          fi
+
+          if grep -q '^CONFIG_TCP_CONG_BBR3=' "$DEFCONFIG"; then
+            echo "CONFIG_TCP_CONG_BBR3 已存在，跳过写入。"
+          else
+            echo 'CONFIG_TCP_CONG_BBR3=y' >> "$DEFCONFIG"
+            echo "已写入 CONFIG_TCP_CONG_BBR3=y"
+          fi
+
+          echo "BBRv3 处理完成。"
 
       - name: 修复 6.6 WiFi/蓝牙兼容性（三星 + 小米）
         if: inputs.kernel_version == '6.6'
