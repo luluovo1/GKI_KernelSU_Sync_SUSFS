@@ -64,6 +64,10 @@ on:
         required: false
         type: boolean
         default: false
+      use_nomount:
+        required: false
+        type: boolean
+        default: false
       cve_2026_43499_patch:
         required: false
         type: boolean
@@ -122,6 +126,7 @@ jobs:
           echo "KPM 功能      : ${{ inputs.use_kpm }}"
           echo "Re-Kernel     : ${{ inputs.use_rekernel }}"
           echo "BBRv3 拥塞控制: ${{ inputs.use_bbrv3 }}"
+          echo "NoMount 隐藏  : ${{ inputs.use_nomount }}"
           echo "CVE-2026-43499: ${{ inputs.cve_2026_43499_patch }}"
           echo "SUSFS 集成补丁导出: ${{ inputs.export_susfs_patches }}"
           echo "Droidspaces   : ${{ inputs.droidspaces }}"
@@ -1187,6 +1192,65 @@ jobs:
           if grep -q "CONFIG_ZSMALLOC=y" "$CONFIG_FILE" && grep -q "CONFIG_ZRAM=y" "$CONFIG_FILE"; then
             cat "$ZZH_PATCHES/config/zram.config" >> "$CONFIG_FILE"
           fi
+
+      - name: 集成 NoMount（VFS 路径重定向）
+        if: inputs.use_nomount
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          set -euo pipefail
+
+          KERNEL_DIR="$KERNEL_ROOT/common"
+          FS_DIR="$KERNEL_DIR/fs"
+
+          if [ ! -d "$FS_DIR" ]; then
+            echo "::error::内核源码目录不存在: $FS_DIR"
+            exit 1
+          fi
+
+          echo "=== NoMount 集成开始 ==="
+          echo "GKI_ROOT : $KERNEL_ROOT"
+          echo "FS_DIR   : $FS_DIR"
+
+          # setup.sh 的行为：在 GKI_ROOT 下 clone maxsteeel/nomount，
+          # 然后在 fs/ 下建符号链接 nomount -> ../NoMount/kernel/src，
+          # 并改写 fs/Makefile 与 fs/Kconfig。
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" \
+            | bash -s dev
+
+          # setup.sh 失败时未必返回非零，所以逐项校验落地结果
+          if [ ! -L "$FS_DIR/nomount" ]; then
+            echo "::error::NoMount 集成失败：$FS_DIR/nomount 符号链接不存在"
+            exit 1
+          fi
+          echo "符号链接已建立: fs/nomount -> $(readlink "$FS_DIR/nomount")"
+
+          if ! grep -q 'nomount' "$FS_DIR/Makefile"; then
+            echo "::error::NoMount 集成失败：fs/Makefile 未加入 nomount 编译单元"
+            exit 1
+          fi
+          if ! grep -q 'fs/nomount/Kconfig' "$FS_DIR/Kconfig"; then
+            echo "::error::NoMount 集成失败：fs/Kconfig 未引入 nomount Kconfig"
+            exit 1
+          fi
+
+          # 记录实际集成的 commit，便于追溯（上游 dev 会浮动）
+          if [ -d "$KERNEL_ROOT/NoMount/.git" ]; then
+            NOMOUNT_SHA=$(git -C "$KERNEL_ROOT/NoMount" rev-parse HEAD)
+            echo "NoMount 实际 commit: $NOMOUNT_SHA"
+            echo "NOMOUNT_COMMIT=$NOMOUNT_SHA" >> "$GITHUB_ENV"
+          else
+            echo "::warning::未找到 NoMount/.git，无法记录实际 commit"
+          fi
+
+          if grep -q '^CONFIG_NOMOUNT=y$' "$DEFCONFIG"; then
+            echo "CONFIG_NOMOUNT 已存在，跳过写入。"
+          else
+            echo 'CONFIG_NOMOUNT=y' >> "$DEFCONFIG"
+            echo "已写入 CONFIG_NOMOUNT=y"
+          fi
+
+          echo "=== NoMount 集成完成 ==="
 
       - name: 添加 BBG 防格机补丁
         if: inputs.use_bbg
