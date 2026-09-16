@@ -75,10 +75,24 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
     fi
     adjust_legacy_fdinfo_context
   fi
-  if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
-    echo "临时调整 Android 13 5.15 LTS 头文件上下文"
+  # 新版内核（5.15.197 起）在 namespace.c 与 task_mmu.c 里各多带了一个 trace/hooks 头文件，
+  # 而 SUSFS 主补丁以 `#include "internal.h"` 和原 include 块为上下文插入代码，
+  # 多出来的那行会让对应 hunk 整段被拒 —— 同样是「编译过得去、功能静默消失」。
+  # 上游按 sublevel >=197 / >=206 判断；这里改成直接看源码里有没有那行：
+  # 实测 5.15.194 及更早两个头文件都不在、5.15.197 起都在，内容探测能精确区分，
+  # 而且对 lts 与将来新增的日期分支都成立（原实现只认 os_patch_level == lts，
+  # 于是 2026-03 起的日期分支全部漏掉）。
+  NS_BLK_H_REMOVED=""
+  if grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
+    echo "临时调整 Android 13 5.15 namespace.c 上下文"
     sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+    NS_BLK_H_REMOVED=1
+  fi
+  TM_MM_H_REMOVED=""
+  if grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c; then
+    echo "临时调整 Android 13 5.15 task_mmu.c 上下文"
     sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
+    TM_MM_H_REMOVED=1
   fi
 fi
 
@@ -220,14 +234,13 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
     sed -i 's|i_uid_into_mnt(i_user_ns(&fi->inode), &fi->inode).val|i_uid_into_mnt(\&init_user_ns, \&fi->inode).val|g' fs/susfs.c
     sed -i 's|i_uid_into_mnt(i_user_ns(inode), inode).val|i_uid_into_mnt(\&init_user_ns, inode).val|g' fs/susfs.c
   fi
-  if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
-    echo "还原 Android 13 5.15 LTS 头文件上下文"
-    if ! grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
-      sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
-    fi
-    if ! grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c; then
-      sed -i '/^#include <linux\/pkeys.h>$/a #include <trace/hooks/mm.h>' fs/proc/task_mmu.c
-    fi
+  if [[ -n "$NS_BLK_H_REMOVED" ]] && ! grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
+    echo "还原 Android 13 5.15 namespace.c 临时调整"
+    sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
+  fi
+  if [[ -n "$TM_MM_H_REMOVED" ]] && ! grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c; then
+    echo "还原 Android 13 5.15 task_mmu.c 临时调整"
+    sed -i '/^#include <linux\/pkeys.h>$/a #include <trace/hooks/mm.h>' fs/proc/task_mmu.c
   fi
 fi
 
