@@ -1,0 +1,18 @@
+# NoMount（maxsteeel/nomount）的固定 commit。
+#
+# 为什么必须固定：内核侧（kernel/src/nomount.h）和用户态（userspace/src/nm.h）
+# 各自声明同一套 ioctl 结构体与命令号。两边来自不同 commit 时结构体布局对不上，
+# nm 连 `nm version` 都读不出来，模块会在 customize.sh 里直接 abort。
+# 所以 build.yml（内核侧）和 nomount-module.yml（用户态）都读这一个文件。
+#
+# 换版本就改下面那一行（40 位小写 hex），两边会一起换。
+#
+#   当前值 = dev 分支 tip @ 2026-09-12
+#            "kernel: replace implicit initialization with memset for compatibility"
+#            dev 领先 WildKernels 的 audited pin 27 个 commit，含 ART 树重写、
+#            规则批量清除、以及最后一条兼容性修复。
+#   备选   = d0f57d5c37ff02aae2299daded57919153240cb3
+#            WildKernels/GKI_KernelSU_SUSFS 在 commit_mode=verified 下用的 audited
+#            pin（2026-08 前后）。如果上面那个在真机上出问题，换成这行再构建。
+#
+7919faf2ab574110e388a4f444e5fef909c24e16

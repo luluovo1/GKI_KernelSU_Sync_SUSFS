@@ -151,6 +151,15 @@ jobs:
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
 
+  # ==================== NoMount 用户态模块 ====================
+  # 与内核构建并行，不互相阻塞：内核侧集成失败会让 build.yml 自己红，
+  # 而这个 Zig 编译失败不该连带把 84 个内核任务全拖停。
+  # 两边都用 .github/nomount-commit.txt 里那一个 commit，所以不需要传值。
+  build-nomount-module:
+    if: inputs.use_nomount
+    uses: ./.github/workflows/nomount-module.yml
+    secrets: inherit
+
   # ==================== Android 12 - 5.10 构建 ====================
   build-a12-5-10:
     if: inputs.build_a12_5_10 || inputs.build_all
@@ -559,6 +568,7 @@ jobs:
       actions: write
     needs:
       - get-manager
+      - build-nomount-module
       - build-a12-5-10
       - build-a13-5-15
       - build-a14-6-1
@@ -947,6 +957,22 @@ jobs:
             gh release upload "$NEW_TAG" "$file" && uploaded=$((uploaded + 1))
           done
           echo "已上传 $uploaded 个 SUSFS 集成补丁压缩包"
+
+      # ==================== 上传 NoMount 用户态模块 ====================
+      # 未启用 NoMount 时该 job 被 skip，result 是 'skipped'，这里自然跳过。
+      # 启用但构建失败时 result 是 'failure'，同样跳过 —— 不能把一个不存在的
+      # 模块塞进 release，那样用户刷进去反而会 abort。
+      - name: 上传 NoMount 用户态模块
+        if: needs.build-nomount-module.result == 'success'
+        continue-on-error: true
+        run: |
+          uploaded=0
+          for file in ./downloaded-artifacts/NoMount-Metamodule/*.zip; do
+            [ -f "$file" ] || continue
+            echo "上传 $file..."
+            gh release upload "$NEW_TAG" "$file" && uploaded=$((uploaded + 1))
+          done
+          echo "已上传 $uploaded 个 NoMount 用户态模块"
 
       # ==================== 上传内核产物 ====================
       - name: 上传内核产物

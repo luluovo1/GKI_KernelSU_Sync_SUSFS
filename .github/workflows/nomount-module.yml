@@ -1,0 +1,186 @@
+# ================================================================
+# NoMount 用户态模块（metamodule）构建
+# ================================================================
+# 内核侧的 CONFIG_NOMOUNT 只提供 VFS 路径重定向的底层能力，规则要靠用户态
+# 的 `nm` 命令配置。这个工作流把 userspace/src/nm.c 编译成静态的
+# nm-arm64 / nm-arm，连同上游的 module/ 目录打包成一个可刷入的 ZIP。
+#
+# 只被 main.yml / kernel-aXX.yml / kernel-custom.yml 通过 workflow_call 调用，
+# 不提供 workflow_dispatch —— 它必须和内核构建用同一个 NoMount commit
+# （见 .github/nomount-commit.txt），单独触发容易搞出版本错配。
+# ================================================================
+
+name: NoMount 用户态模块
+
+on:
+  workflow_call:
+
+jobs:
+  build-module:
+    name: "NoMount metamodule (nm-arm64 + nm-arm)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码仓库
+        uses: actions/checkout@v7
+
+      # ==================== 读取固定的 NoMount commit ====================
+      # 与 build.yml 的内核侧集成读同一个文件，保证两边同源。
+      - name: 读取 NoMount 固定 commit
+        id: pin
+        run: |
+          set -euo pipefail
+
+          PIN_FILE="$GITHUB_WORKSPACE/.github/nomount-commit.txt"
+          if [ ! -f "$PIN_FILE" ]; then
+            echo "::error::找不到 $PIN_FILE"
+            exit 1
+          fi
+
+          # 跳过注释行与空行，取第一条有效行；tr 顺带吃掉 CRLF 的 \r
+          SHA=$(grep -vE '^[[:space:]]*#' "$PIN_FILE" | grep -vE '^[[:space:]]*$' | head -n 1 | tr -d '[:space:]')
+
+          if ! printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::nomount-commit.txt 里的 commit 不是 40 位小写 hex：'$SHA'"
+            exit 1
+          fi
+
+          echo "NoMount 固定 commit: $SHA"
+          echo "commit=$SHA" >> "$GITHUB_OUTPUT"
+
+      # ==================== 安装 Zig ====================
+      # 用 Zig 当交叉编译器：一条命令直接产出静态、不依赖 libc 的 aarch64/arm
+      # 可执行文件，不需要装 arm 的 gcc 工具链。
+      #
+      # 版本写死 0.15.2，不用上游的 master：master 是每日滚动的，
+      # 而 zig cc 的命令行兼容性并非稳定契约，哪天 master 改了默认行为
+      # 这个 job 就会莫名其妙红掉，而且没法复现。0.15.2 是本机实测
+      # 能编译出正确产物的版本（nm-arm64: ELF 64-bit ARM aarch64 static；
+      # nm-arm: ELF 32-bit ARM EABI5 static）。要升级就改这一行并重新验。
+      - name: 安装 Zig
+        uses: jetsung/setup-zig@v0.0.4
+        with:
+          version: 0.15.2
+
+      # ==================== 编译并打包 ====================
+      - name: 编译并打包 metamodule
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="${{ steps.pin.outputs.commit }}"
+          SOURCE_DIR="$RUNNER_TEMP/nomount-src"
+          MODULE_DIR="$RUNNER_TEMP/nomount-metamodule"
+          MODULE_ZIP="$RUNNER_TEMP/NoMount-Metamodule.zip"
+
+          echo "=== 拉取 NoMount 源码 ==="
+          git clone --no-checkout https://github.com/maxsteeel/nomount.git "$SOURCE_DIR"
+          # --depth=1 直接取指定 SHA：GitHub 允许按 SHA fetch，不要求它是某个分支的
+          # 尖端。所以 pin 换成任意历史 commit 也拉得下来。
+          # SHA 写错时这一步就非零退出（git 返回 128），不会带着错的版本往下走。
+          git -C "$SOURCE_DIR" fetch --depth=1 origin "$EXPECTED"
+          git -C "$SOURCE_DIR" checkout --detach "$EXPECTED"
+
+          # 这里**故意不做** `rev-parse HEAD != EXPECTED` 的比对：
+          # 上面三行是「fetch 这个 SHA、checkout 这个 SHA」，HEAD 必然等于
+          # EXPECTED，那条断言永远不会红，留着只会让人以为这里验过什么。
+          # 真正需要验的是「这个 commit 里的目录结构还长这样」——见下面的文件检查。
+          ACTUAL=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+          echo "已检出 $ACTUAL"
+
+          # pin 指向老 commit 时，目录结构可能与脚本假设不符（比如 userspace/ 改名
+          # 或 module/ 还没建）。先检查再编译，否则会得到一个看不懂的 zig 报错。
+          for REL in userspace/src/nm.c userspace/src/nm.h \
+                     module/customize.sh module/module.prop; do
+            if [ ! -f "$SOURCE_DIR/$REL" ]; then
+              echo "::error::NoMount $ACTUAL 里缺少 $REL —— pin 可能指到了不兼容的 commit"
+              exit 1
+            fi
+          done
+
+          # ==================== 交叉编译 ====================
+          # 参数逐字沿用上游 WildKernels 的配方，不做"顺手统一"：
+          #   -static -nostdlib -ffreestanding  不链接任何运行时，syscall 用
+          #                                     nm.h 里的内联汇编直接发
+          #   -Wl,--entry=_start                _start 也定义在 nm.h 里
+          #   -Oz                               体积优先
+          # 两处命令的参数并不相同（aarch64 有 -mcmodel=tiny，arm 没有，
+          # 但 arm 多了 -ffunction-sections/-fdata-sections/--gc-sections）。
+          # 差异原因未考证，所以照抄而不是猜一个"等价写法"。
+          echo "=== 编译 nm-arm64 ==="
+          mkdir -p "$SOURCE_DIR/bin"
+          (
+            cd "$SOURCE_DIR/userspace/src"
+            zig cc -target aarch64-linux -Oz -mcmodel=tiny -static -nostdlib \
+              -ffreestanding -fno-unwind-tables -fno-ident -Wno-invalid-noreturn \
+              -Wl,--entry=_start nm.c -o ../../bin/nm-arm64
+
+            echo "=== 编译 nm-arm ==="
+            zig cc -target arm-linux -Oz -static -nostdlib -ffreestanding \
+              -fno-unwind-tables -fno-ident -Wno-invalid-noreturn \
+              -ffunction-sections -fdata-sections -Wl,--gc-sections \
+              -Wl,--entry=_start nm.c -o ../../bin/nm-arm
+          )
+
+          # 编译产物必须是 ARM 的静态可执行文件。这里断言的是"产物类型对了"，
+          # 不是"产物能跑"—— 能不能跑只能上真机验。
+          for BIN in nm-arm64 nm-arm; do
+            if [ ! -s "$SOURCE_DIR/bin/$BIN" ]; then
+              echo "::error::$BIN 没有生成或为空"
+              exit 1
+            fi
+          done
+          file "$SOURCE_DIR/bin/nm-arm64" "$SOURCE_DIR/bin/nm-arm" || true
+
+          # ==================== 打包 ====================
+          echo "=== 组装模块目录 ==="
+          cp -a "$SOURCE_DIR/module" "$MODULE_DIR"
+          mkdir -p "$MODULE_DIR/bin"
+          install -m 0755 "$SOURCE_DIR/bin/nm-arm64" "$MODULE_DIR/bin/nm-arm64"
+          install -m 0755 "$SOURCE_DIR/bin/nm-arm"   "$MODULE_DIR/bin/nm-arm"
+
+          # 上游 module.prop 的 versionCode 是空的，Magisk 会因此认为版本号是 0、
+          # 更新时不做版本比较。填成 1 让模块管理器能正常识别。
+          sed -i "s/^versionCode=.*/versionCode=1/" "$MODULE_DIR/module.prop"
+
+          # 记录模块是用哪个 NoMount commit 编译的 —— 出问题时这是唯一能对账的东西
+          printf '%s\n' "$ACTUAL" > "$MODULE_DIR/NOMOUNT_SOURCE_COMMIT"
+
+          # 这里只装内置版（内核 CONFIG_NOMOUNT=y），因此不带 .ko，
+          # 也不带上游 LKM 方案才需要的 lkmloader/ko-loader 二进制。
+          # customize.sh 会用 `nm version` 探测到内核已内置、走 IS_BUILTIN 分支；
+          # 它前面那句 `mv bin/lkmloader-$ARCH` 会因文件不存在而失败，但 Magisk 的
+          # customize.sh 不带 set -e，失败不致命（上游 WildKernels 的 metamodule
+          # 同样不提供这个文件，行为一致）。
+
+          echo "=== 模块内容 ==="
+          find "$MODULE_DIR" -type f | sed "s|$MODULE_DIR/||" | sort
+
+          (
+            cd "$MODULE_DIR"
+            zip -qr "$MODULE_ZIP" .
+          )
+          unzip -l "$MODULE_ZIP"
+
+          echo "module_path=$MODULE_ZIP" >> "$GITHUB_OUTPUT"
+          echo "commit=$ACTUAL" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### NoMount 用户态模块"
+            echo ""
+            echo "- 源码 commit: \`$ACTUAL\`"
+            echo "- nm-arm64: $(stat -c '%s' "$SOURCE_DIR/bin/nm-arm64") 字节"
+            echo "- nm-arm:   $(stat -c '%s' "$SOURCE_DIR/bin/nm-arm") 字节"
+            echo "- sha256: \`$(sha256sum "$MODULE_ZIP" | awk '{print $1}')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 NoMount 用户态模块
+        uses: actions/upload-artifact@v6
+        with:
+          name: NoMount-Metamodule
+          path: ${{ steps.package.outputs.module_path }}
+          if-no-files-found: error
+          # 里面已经是压缩过的 ZIP，再压一遍没收益
+          compression-level: 0

@@ -229,6 +229,13 @@ jobs:
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
 
+  # NoMount 用户态模块（nm）与内核侧必须同源，所以也读 .github/nomount-commit.txt。
+  # 本工作流只能单独触发，不存在被 main.yml 调用的情形，所以不需要防重复。
+  build-nomount-module:
+    if: inputs.use_nomount
+    uses: ./.github/workflows/nomount-module.yml
+    secrets: inherit
+
   get-ksu-manager:
     uses: ./.github/workflows/get-manager.yml
     secrets: inherit
