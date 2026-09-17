@@ -1271,7 +1271,8 @@ jobs:
             echo "::error::NoMount 源码 commit 与固定值不符：期望 $NOMOUNT_PIN，实际 $NOMOUNT_SHA"
             exit 1
           fi
-          echo "NOMOUNT_COMMIT=$NOMOUNT_SHA" >> "$GITHUB_ENV"
+          # 不把 commit 写进 $GITHUB_ENV：它不跨 job，用户态模块 job 也读不到，
+          # 两边同源由 nomount-module.yml 读同一个 pin 文件保证；这里 echo 出来仅供日志对账。
 
           if grep -q '^CONFIG_NOMOUNT=y$' "$DEFCONFIG"; then
             echo "CONFIG_NOMOUNT 已存在，跳过写入。"

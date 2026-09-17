@@ -88,6 +88,22 @@ The fix has passed a [full build validation covering 84 kernel versions](https:/
 
 **If the build fails or bootloops after flashing:** Try switching to a different slot patch (e.g. 678 → 123 or 345). Different kernel sub-levels may require different patches.
 
+---
+
+## 🧪 NoMount Path Redirection (Experimental)
+
+> **Experimental feature:** NoMount requires the kernel and the userspace module to be built from the **same source commit**. Always back up your boot image before flashing.
+
+[NoMount](https://github.com/maxsteeel/nomount) is a metamodule that replaces OverlayFS / MagicMount with VFS path redirection. Rules take effect entirely in kernel space and create **no mount points at all**, making it stealthier than "mount-then-hide" approaches. It requires the kernel to be built with `CONFIG_NOMOUNT=y`, plus a separate `nm` userspace module that installs the rules.
+
+**Supported versions:** 5.10 / 5.15 / 6.1 / 6.6 / 6.12
+
+**Usage:** When triggering a build manually, enable the `Integrate NoMount` option (off by default). The build additionally produces a **`NoMount-Metamodule.zip`**, which must be **flashed separately** in your module manager — the kernel provides the low-level capability, the module installs the rules, and both are required.
+
+> **Important:** The kernel side (`nomount.h`) and the userspace side (`nm.h`) declare the same set of ioctl structs and must come from the same NoMount commit, otherwise the module cannot even read `nm version`. This repo pins the version in [`.github/nomount-commit.txt`](.github/nomount-commit.txt); both the kernel build and the module packaging read that single file, so a version mismatch cannot happen.
+
+> **Requirement:** The userspace module needs a KernelSU or APatch environment.
+
 ## 🔧 Custom Commit Pinning
 Use the [`config/config`](config/config) file to pin SUSFS and SukiSU to specific commits.
 

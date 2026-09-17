@@ -93,6 +93,22 @@ GhostLock 是影响 Linux 内核的一组高风险漏洞，包括 `CVE-2026-4349
 
 **如果构建失败或刷入后 bootloop：** 可尝试切换到其他槽位补丁（如 678 → 123 或 345），不同内核子版本可能适用不同的补丁。
 
+---
+
+## 🧪 NoMount 路径重定向（实验性）
+
+> **实验性功能：** NoMount 要求内核与用户态模块**同源编译**，刷入前请务必备份 Boot 镜像。
+
+[NoMount](https://github.com/maxsteeel/nomount) 是一个 metamodule，用 VFS 路径重定向替代 OverlayFS / MagicMount：规则完全在内核态生效，**不产生任何挂载点**，因此比"挂载后再隐藏"的方案更隐蔽。它需要内核开启 `CONFIG_NOMOUNT=y`，并由一个独立的 `nm` 用户态模块下发规则。
+
+**支持范围：** 5.10 / 5.15 / 6.1 / 6.6 / 6.12
+
+**使用方式：** 在手动触发构建时，开启 `集成 NoMount` 选项（默认关闭）。构建完成后会**额外**产出一个 **`NoMount-Metamodule.zip`**，需要在你的模块管理器里**单独刷入**——内核提供底层能力，模块负责下发规则，两者缺一不可。
+
+> **重要：** 内核侧（`nomount.h`）与用户态（`nm.h`）声明的是同一套 ioctl 结构体，必须来自同一个 NoMount commit，否则模块连 `nm version` 都读不出来。本仓库把版本固定在 [`.github/nomount-commit.txt`](.github/nomount-commit.txt)，构建内核与打包模块读的是同一个文件，因此不会出现版本错配。
+
+> **要求：** 用户态模块需要 KernelSU 或 APatch 环境。
+
 ## 🔧 自定义提交配置
 通过 [`config/config`](config/config) 文件可以指定 SUSFS 和 SukiSU 使用特定的 commit。
 
